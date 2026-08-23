@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pydepot-portable"
+version = "0.1.0"
+description = "Gestionnaire portable de bundles de dependances Python hors ligne"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "PyDepot contributors" }]
+classifiers = [
+  "Environment :: Console",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Build Tools",
+]
+
+[project.scripts]
+pydepot = "pydepot.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pydepot"]

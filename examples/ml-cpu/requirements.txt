@@ -1,0 +1,6 @@
+# Exemple reproductible vérifié le 20 août 2026.
+# PyTorch CPU provient de https://download.pytorch.org/whl/cpu.
+pandas==3.0.5
+xgboost==3.3.0
+torch==2.13.0+cpu
+

@@ -1,0 +1,8 @@
+**
+!dist/
+!dist/pydepot.pyz
+!examples/
+!examples/ml-cpu/
+!examples/ml-cpu/requirements.txt
+!examples/ml-cpu/build-linux-bundle.sh
+

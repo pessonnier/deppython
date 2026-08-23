@@ -1,0 +1,74 @@
+# Scientific computing / data
+numpy
+pandas
+polars
+pyarrow
+scipy
+matplotlib
+plotly
+pillow
+xgboost
+
+# Web scraping / HTTP
+beautifulsoup4
+scrapy
+requests
+httpx
+
+# Validation / APIs / web applications
+pydantic
+fastapi
+uvicorn
+django
+streamlit
+mitmproxy
+
+# Databases
+sqlalchemy
+psycopg[binary]
+pymysql
+pyodbc
+oracledb
+pymongo
+neo4j
+
+# Spreadsheets
+openpyxl
+xlsxwriter
+python-calamine
+
+# Static analysis / code quality / security
+semgrep
+ruff
+mypy
+bandit
+radon
+tree-sitter
+pip-audit
+
+# Tests / E2E / API / load
+pytest
+pytest-xdist
+hypothesis
+selenium
+playwright
+robotframework
+schemathesis
+locust
+
+# CLI / TUI
+rich
+textual
+typer
+
+# LLM / AI
+openai
+tiktoken
+torch
+transformers
+datasets
+huggingface_hub
+
+# Development / documentation
+jupyterlab
+mkdocs
