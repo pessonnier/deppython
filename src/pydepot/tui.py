@@ -186,10 +186,13 @@ def _inspect_wizard() -> None:
         _header("CONTENU DU BUNDLE")
         print(f"  Python       {CYAN}{manifest.python_version}{RESET}")
         print(f"  Paquets      {CYAN}{len(manifest.artifacts)}{RESET}")
+        print(f"  Exécutables  {CYAN}{len(manifest.executables)}{RESET}")
         print(f"  Plateformes  {', '.join(manifest.platforms) or 'courante'}")
         print(f"  Intégrité    {GREEN}{'vérifiée' if verify else 'non vérifiée'}{RESET}\n")
         for artifact in manifest.artifacts:
             print(f"  {artifact.name or artifact.filename:<30} {artifact.version or '?'}")
+        for executable in manifest.executables:
+            print(f"  {executable.filename:<30} exécutable")
     except PyDepotError as exc:
         print(f"\n  {RED}Erreur: {exc}{RESET}")
     _pause()

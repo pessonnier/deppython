@@ -10,6 +10,7 @@ from unittest import mock
 
 from pydepot.bundle import (
     ExportOptions,
+    IncludedExecutable,
     ImportOptions,
     export_bundle,
     import_bundle,
@@ -42,13 +43,23 @@ class BundleTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
-    def make_bundle(self, version: str = "3.11") -> Path:
+    def make_bundle(self, version: str = "3.11", include_tool: bool = False) -> Path:
         output = self.root / "demo.pybundle"
+        executables = []
+        if include_tool:
+            tool = self.root / "opencode-source"
+            tool.write_bytes(b"linux executable")
+            executables.append(IncludedExecutable(tool, "opencode"))
         with mock.patch(
             "pydepot.bundle.run_streaming", side_effect=_fake_download
         ), mock.patch("pydepot.bundle.python_version", return_value="3.11"):
             export_bundle(
-                ExportOptions(output=output, packages=["demo-lib>=1"], python_version=version)
+                ExportOptions(
+                    output=output,
+                    packages=["demo-lib>=1"],
+                    python_version=version,
+                    executables=executables,
+                )
             )
         return output
 
@@ -58,10 +69,30 @@ class BundleTests(unittest.TestCase):
         self.assertEqual(manifest.python_version, "3.11")
         self.assertEqual(len(manifest.artifacts), 2)
         self.assertEqual(manifest.requested, ["demo-lib>=1"])
+        self.assertEqual(manifest.format_version, 2)
         with zipfile.ZipFile(output) as archive:
             lock = archive.read("requirements.lock").decode()
             self.assertIn("demo-lib==1.2.3", lock)
             self.assertIn("transitive==4.5.6", lock)
+
+    def test_export_includes_verifiable_executable(self) -> None:
+        output = self.make_bundle(include_tool=True)
+        manifest = inspect_bundle(output, verify=True)
+        self.assertEqual([item.filename for item in manifest.executables], ["opencode"])
+        with zipfile.ZipFile(output) as archive:
+            self.assertEqual(archive.read("tools/opencode"), b"linux executable")
+
+    def test_modified_executable_is_rejected(self) -> None:
+        output = self.make_bundle(include_tool=True)
+        altered = self.root / "altered-tool.pybundle"
+        with zipfile.ZipFile(output) as source, zipfile.ZipFile(altered, "w") as target:
+            for info in source.infolist():
+                content = source.read(info.filename)
+                if info.filename == "tools/opencode":
+                    content = bytes([content[0] ^ 1]) + content[1:]
+                target.writestr(info, content)
+        with self.assertRaisesRegex(BundleError, "Empreinte invalide"):
+            inspect_bundle(altered, verify=True)
 
     def test_modified_artifact_is_rejected(self) -> None:
         output = self.make_bundle()
@@ -115,6 +146,53 @@ class BundleTests(unittest.TestCase):
         self.assertNotIn("PIP_INDEX_URL", environment)
         self.assertEqual(calls[2][0], [str(expected), "-m", "pip", "check"])
 
+    def test_import_installs_executable_in_venv_bin(self) -> None:
+        output = self.make_bundle(include_tool=True)
+        venv = self.root / "venv-with-tool"
+
+        with mock.patch("pydepot.bundle.run_streaming"), mock.patch(
+            "pydepot.bundle.python_version", return_value="3.11"
+        ):
+            import_bundle(
+                ImportOptions(
+                    bundle=output,
+                    venv_path=venv,
+                    python_executable="python3.11",
+                )
+            )
+
+        tools = venv / ("Scripts" if os.name == "nt" else "bin")
+        self.assertEqual((tools / "opencode").read_bytes(), b"linux executable")
+        if os.name != "nt":
+            self.assertTrue((tools / "opencode").stat().st_mode & 0o111)
+
+    def test_existing_different_executable_requires_upgrade(self) -> None:
+        output = self.make_bundle(include_tool=True)
+        tools = self.root / "tools"
+        tools.mkdir()
+        (tools / "opencode").write_bytes(b"older")
+
+        with mock.patch("pydepot.bundle.run_streaming"), mock.patch(
+            "pydepot.bundle.python_version", return_value="3.11"
+        ):
+            with self.assertRaisesRegex(PyDepotError, "--upgrade"):
+                import_bundle(
+                    ImportOptions(
+                        bundle=output,
+                        python_executable="python3.11",
+                        tools_dir=tools,
+                    )
+                )
+
+    def test_tool_bundle_requires_destination_before_installing_packages(self) -> None:
+        output = self.make_bundle(include_tool=True)
+        with mock.patch("pydepot.bundle.run_streaming") as run:
+            with self.assertRaisesRegex(PyDepotError, "--venv"):
+                import_bundle(
+                    ImportOptions(bundle=output, python_executable="python3.11")
+                )
+        run.assert_not_called()
+
     def test_export_rejects_different_resolver_python_version(self) -> None:
         with mock.patch("pydepot.bundle.python_version", return_value="3.14"):
             with self.assertRaisesRegex(PyDepotError, "même version majeure/mineure"):
@@ -125,6 +203,40 @@ class BundleTests(unittest.TestCase):
                         python_version="3.12",
                     )
                 )
+
+    def test_cross_platform_export_requires_explicit_opt_in(self) -> None:
+        with mock.patch("pydepot.bundle.python_version", return_value="3.11"), mock.patch(
+            "pydepot.bundle.os.name", "nt"
+        ):
+            with self.assertRaisesRegex(PyDepotError, "--allow-cross-platform"):
+                export_bundle(
+                    ExportOptions(
+                        output=self.root / "linux.pybundle",
+                        packages=["demo-lib"],
+                        python_version="3.11",
+                        platforms=["manylinux_2_17_x86_64"],
+                    )
+                )
+
+    def test_cross_platform_export_can_be_acknowledged(self) -> None:
+        messages: list[str] = []
+        with mock.patch(
+            "pydepot.bundle.run_streaming", side_effect=_fake_download
+        ), mock.patch("pydepot.bundle.python_version", return_value="3.11"), mock.patch(
+            "pydepot.bundle.os.name", "nt"
+        ):
+            manifest = export_bundle(
+                ExportOptions(
+                    output=self.root / "linux.pybundle",
+                    packages=["demo-lib"],
+                    python_version="3.11",
+                    platforms=["manylinux_2_17_x86_64"],
+                    allow_cross_platform=True,
+                ),
+                progress=messages.append,
+            )
+        self.assertEqual(manifest.platforms, ["manylinux_2_17_x86_64"])
+        self.assertTrue(any("résolution croisée" in message for message in messages))
 
     def test_failed_venv_creation_cleans_new_partial_directory(self) -> None:
         output = self.make_bundle()

@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import sys
 import tempfile
 import zipfile
@@ -13,7 +14,7 @@ from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from .errors import BundleError, CommandError, PyDepotError
-from .model import Artifact, Manifest
+from .model import Artifact, BundledExecutable, Manifest
 from .util import (
     Progress,
     default_python_executable,
@@ -29,6 +30,13 @@ from .util import (
 MANIFEST_NAME = "manifest.json"
 LOCK_NAME = "requirements.lock"
 WHEELHOUSE = "packages"
+TOOLS = "tools"
+
+
+@dataclass(frozen=True)
+class IncludedExecutable:
+    source: Path
+    name: str | None = None
 
 
 @dataclass
@@ -44,6 +52,8 @@ class ExportOptions:
     extra_index_urls: list[str] = field(default_factory=list)
     prerelease: bool = False
     python_executable: str = field(default_factory=default_python_executable)
+    executables: list[IncludedExecutable] = field(default_factory=list)
+    allow_cross_platform: bool = False
 
 
 @dataclass
@@ -55,12 +65,16 @@ class ImportOptions:
     verify: bool = True
     ignore_python_version: bool = False
     upgrade: bool = False
+    tools_dir: Path | None = None
 
 
 def export_bundle(options: ExportOptions, progress: Progress | None = None) -> Manifest:
     notify = progress or (lambda _message: None)
     target_version = normalize_python_version(options.python_version)
-    resolver_version = python_version(options.python_executable)
+    if options.packages or options.requirements:
+        resolver_version = python_version(options.python_executable)
+    else:
+        resolver_version = target_version
     if resolver_version != target_version:
         raise PyDepotError(
             f"L'interpréteur d'export utilise Python {resolver_version}, mais le bundle cible "
@@ -68,14 +82,23 @@ def export_bundle(options: ExportOptions, progress: Progress | None = None) -> M
             "l'interpréteur d'export ; choisissez un Python de même version majeure/mineure "
             "(un Python portable peut être installé depuis la TUI)."
         )
-    _validate_platform_environment(options.platforms)
+    cross_platforms = _validate_platform_environment(
+        options.platforms, allow_cross_platform=options.allow_cross_platform
+    )
+    if cross_platforms:
+        notify(
+            "Avertissement: résolution croisée vers "
+            f"{', '.join(cross_platforms)} ; vérifiez les marqueurs de dépendances de la cible."
+        )
     requested = list(options.packages)
     if options.requirements:
         if not options.requirements.is_file():
             raise PyDepotError(f"Fichier requirements introuvable: {options.requirements}")
         requested.extend(_read_top_level_requirements(options.requirements))
-    if not options.packages and not options.requirements:
-        raise PyDepotError("Indiquez au moins un paquet ou un fichier requirements.")
+    if not options.packages and not options.requirements and not options.executables:
+        raise PyDepotError(
+            "Indiquez au moins un paquet, un fichier requirements ou un exécutable."
+        )
     if not requested and options.requirements:
         requested.append(f"-r {options.requirements.name}")
 
@@ -89,16 +112,19 @@ def export_bundle(options: ExportOptions, progress: Progress | None = None) -> M
         root = Path(temporary)
         package_dir = root / WHEELHOUSE
         package_dir.mkdir()
-        command = _download_command(options, target_version, package_dir)
-        run_streaming(command, notify)
+        if options.packages or options.requirements:
+            command = _download_command(options, target_version, package_dir)
+            run_streaming(command, notify)
 
         files = sorted(path for path in package_dir.iterdir() if path.is_file())
-        if not files:
+        if (options.packages or options.requirements) and not files:
             raise BundleError("pip n'a téléchargé aucun artefact.")
         artifacts = [_artifact_from_file(path) for path in files]
         lock_lines = _lock_lines(artifacts)
-        if not lock_lines:
+        if files and not lock_lines:
             raise BundleError("Aucun wheel exploitable n'a été trouvé dans le téléchargement.")
+
+        bundled_executables = _copy_executables(options.executables, root / TOOLS)
 
         manifest = Manifest(
             python_version=target_version,
@@ -107,6 +133,7 @@ def export_bundle(options: ExportOptions, progress: Progress | None = None) -> M
             abis=list(options.abis),
             requested=requested,
             artifacts=artifacts,
+            executables=bundled_executables,
         )
         (root / MANIFEST_NAME).write_bytes(
             (json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -114,7 +141,10 @@ def export_bundle(options: ExportOptions, progress: Progress | None = None) -> M
         (root / LOCK_NAME).write_bytes(("\n".join(lock_lines) + "\n").encode("utf-8"))
         _write_bundle_atomically(root, output)
 
-    notify(f"Bundle créé: {output} ({len(manifest.artifacts)} fichier(s))")
+    notify(
+        f"Bundle créé: {output} "
+        f"({len(manifest.artifacts)} wheel(s), {len(manifest.executables)} exécutable(s))"
+    )
     return manifest
 
 
@@ -147,6 +177,9 @@ def import_bundle(options: ImportOptions, progress: Progress | None = None) -> P
     if options.venv_path and options.target:
         raise PyDepotError("--venv et --target ne peuvent pas être utilisés ensemble.")
     manifest = inspect_bundle(options.bundle, verify=False)
+    tools_destination = (
+        _tools_destination(options) if manifest.executables else None
+    )
     with tempfile.TemporaryDirectory(prefix="pydepot-import-") as temporary:
         root = Path(temporary)
         notify("Extraction et contrôle du bundle…")
@@ -189,30 +222,42 @@ def import_bundle(options: ImportOptions, progress: Progress | None = None) -> P
                 raise
             executable = str(venv_python(venv_path))
 
-        command = [
-            executable,
-            "-m",
-            "pip",
-            "install",
-            "--no-index",
-            "--no-deps",
-            "--find-links",
-            str(root / WHEELHOUSE),
-            "--requirement",
-            str(root / LOCK_NAME),
-        ]
-        if options.upgrade:
-            command.append("--upgrade")
-        if options.target:
-            options.target.mkdir(parents=True, exist_ok=True)
-            command.extend(["--target", str(options.target.resolve())])
+        command: list[str] | None = None
+        if manifest.artifacts:
+            command = [
+                executable,
+                "-m",
+                "pip",
+                "install",
+                "--no-index",
+                "--no-deps",
+                "--find-links",
+                str(root / WHEELHOUSE),
+                "--requirement",
+                str(root / LOCK_NAME),
+            ]
+            if options.upgrade:
+                command.append("--upgrade")
+            if options.target:
+                options.target.mkdir(parents=True, exist_ok=True)
+                command.extend(["--target", str(options.target.resolve())])
         try:
-            run_streaming(command, notify, env=_offline_environment())
-            if options.venv_path:
+            if command:
+                run_streaming(command, notify, env=_offline_environment())
+            if options.venv_path and manifest.artifacts:
                 run_streaming(
                     [executable, "-m", "pip", "check"],
                     notify,
                     env=_offline_environment(),
+                )
+            if manifest.executables:
+                assert tools_destination is not None
+                _install_executables(
+                    root / TOOLS,
+                    manifest.executables,
+                    tools_destination,
+                    overwrite=options.upgrade,
+                    notify=notify,
                 )
         except CommandError:
             if options.venv_path and not venv_existed and venv_path.exists():
@@ -256,7 +301,9 @@ def _download_command(options: ExportOptions, version: str, destination: Path) -
     return command
 
 
-def _validate_platform_environment(platforms: list[str]) -> None:
+def _validate_platform_environment(
+    platforms: list[str], allow_cross_platform: bool = False
+) -> list[str]:
     current = (
         "windows" if os.name == "nt" else "macos" if sys.platform == "darwin" else "linux"
     )
@@ -267,17 +314,112 @@ def _validate_platform_environment(platforms: list[str]) -> None:
         "linux": "linux",
         "macosx": "macos",
     }
+    cross_platforms: list[str] = []
     for platform in platforms:
         family = next(
             (value for prefix, value in prefixes.items() if platform.lower().startswith(prefix)),
             None,
         )
-        if family and family != current:
+        if family and family != current and not allow_cross_platform:
             raise PyDepotError(
                 f"La plateforme cible {platform!r} ne correspond pas au système d'export "
                 f"({current}). pip évalue les marqueurs de plateforme sur le système courant ; "
-                "créez ce bundle sur la même famille de système que la cible."
+                "créez ce bundle sur la même famille de système que la cible ou utilisez "
+                "--allow-cross-platform après avoir contrôlé les marqueurs de dépendances."
             )
+        if family and family != current:
+            cross_platforms.append(platform)
+    return cross_platforms
+
+
+def _copy_executables(
+    specifications: Iterable[IncludedExecutable], destination: Path
+) -> list[BundledExecutable]:
+    result: list[BundledExecutable] = []
+    seen: set[str] = set()
+    for specification in specifications:
+        source = specification.source.resolve()
+        if not source.is_file():
+            raise PyDepotError(f"Exécutable introuvable: {specification.source}")
+        name = specification.name or source.name
+        _validate_tool_name(name)
+        key = name.casefold()
+        if key in seen:
+            raise PyDepotError(f"Nom d'exécutable dupliqué: {name}")
+        seen.add(key)
+        destination.mkdir(parents=True, exist_ok=True)
+        target = destination / name
+        shutil.copyfile(source, target)
+        result.append(
+            BundledExecutable(
+                filename=name,
+                sha256=sha256_file(target),
+                size=target.stat().st_size,
+            )
+        )
+    return result
+
+
+def _validate_tool_name(name: str) -> None:
+    if (
+        not name
+        or PurePosixPath(name).name != name
+        or "\\" in name
+        or name in {".", ".."}
+    ):
+        raise PyDepotError(f"Nom d'exécutable invalide: {name!r}")
+
+
+def _tools_destination(options: ImportOptions) -> Path:
+    if options.tools_dir:
+        return options.tools_dir.resolve()
+    if options.venv_path:
+        return options.venv_path.resolve() / ("Scripts" if os.name == "nt" else "bin")
+    if options.target:
+        return options.target.resolve() / "bin"
+    raise PyDepotError(
+        "Ce bundle contient des exécutables. Utilisez --venv, --target ou --tools-dir "
+        "pour choisir leur destination."
+    )
+
+
+def _install_executables(
+    source: Path,
+    executables: Iterable[BundledExecutable],
+    destination: Path,
+    overwrite: bool,
+    notify: Progress,
+) -> None:
+    destination.mkdir(parents=True, exist_ok=True)
+    for executable in executables:
+        target = destination / executable.filename
+        if target.exists():
+            if (
+                not target.is_symlink()
+                and target.is_file()
+                and sha256_file(target) == executable.sha256
+            ):
+                target.chmod(
+                    target.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+                )
+                notify(f"Exécutable déjà présent: {target}")
+                continue
+            if not overwrite:
+                raise PyDepotError(
+                    f"La destination existe déjà: {target}. Utilisez --upgrade pour la remplacer."
+                )
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{executable.filename}.", suffix=".tmp", dir=destination
+        )
+        os.close(descriptor)
+        temporary = Path(temporary_name)
+        try:
+            shutil.copyfile(source / executable.filename, temporary)
+            temporary.chmod(temporary.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        notify(f"Exécutable installé: {target}")
 
 
 def _read_top_level_requirements(path: Path) -> list[str]:
@@ -369,11 +511,28 @@ def _validate_manifest_artifacts(manifest: Manifest) -> None:
         if not re.fullmatch(r"[0-9a-f]{64}", artifact.sha256):
             raise BundleError(f"Empreinte invalide dans le manifeste: {artifact.filename}")
         seen.add(artifact.filename)
+    tool_names: set[str] = set()
+    for executable in manifest.executables:
+        try:
+            _validate_tool_name(executable.filename)
+        except PyDepotError as exc:
+            raise BundleError(str(exc)) from exc
+        key = executable.filename.casefold()
+        if key in tool_names:
+            raise BundleError(f"Exécutable dupliqué: {executable.filename}")
+        if executable.size < 0:
+            raise BundleError(f"Taille d'exécutable invalide: {executable.filename}")
+        if not re.fullmatch(r"[0-9a-f]{64}", executable.sha256):
+            raise BundleError(
+                f"Empreinte d'exécutable invalide: {executable.filename}"
+            )
+        tool_names.add(key)
 
 
 def _validate_bundle_layout(archive: zipfile.ZipFile, manifest: Manifest) -> None:
     expected = {MANIFEST_NAME, LOCK_NAME}
     expected.update(f"{WHEELHOUSE}/{artifact.filename}" for artifact in manifest.artifacts)
+    expected.update(f"{TOOLS}/{item.filename}" for item in manifest.executables)
     files = {item.filename for item in archive.infolist() if not item.is_dir()}
     unexpected = sorted(files - expected)
     missing = sorted(expected - files)
@@ -388,6 +547,10 @@ def _validate_bundle_layout(archive: zipfile.ZipFile, manifest: Manifest) -> Non
         member = f"{WHEELHOUSE}/{artifact.filename}"
         if sizes[member] != artifact.size:
             raise BundleError(f"Taille déclarée invalide: {artifact.filename}")
+    for executable in manifest.executables:
+        member = f"{TOOLS}/{executable.filename}"
+        if sizes[member] != executable.size:
+            raise BundleError(f"Taille déclarée invalide: {executable.filename}")
 
 
 def _verify_archive(archive: zipfile.ZipFile, manifest: Manifest) -> None:
@@ -402,6 +565,16 @@ def _verify_archive(archive: zipfile.ZipFile, manifest: Manifest) -> None:
                 digest.update(chunk)
         if digest.hexdigest() != artifact.sha256:
             raise BundleError(f"Empreinte invalide: {artifact.filename}")
+    for executable in manifest.executables:
+        member = f"{TOOLS}/{executable.filename}"
+        if member not in names:
+            raise BundleError(f"Exécutable manquant: {executable.filename}")
+        digest = __import__("hashlib").sha256()
+        with archive.open(member) as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+        if digest.hexdigest() != executable.sha256:
+            raise BundleError(f"Empreinte invalide: {executable.filename}")
     expected_lock = "\n".join(_lock_lines(manifest.artifacts)) + "\n"
     try:
         actual_lock = archive.read(LOCK_NAME).decode("utf-8")
@@ -418,6 +591,12 @@ def _verify_directory(root: Path, manifest: Manifest) -> None:
             raise BundleError(f"Artefact manquant: {artifact.filename}")
         if path.stat().st_size != artifact.size or sha256_file(path) != artifact.sha256:
             raise BundleError(f"Artefact altéré: {artifact.filename}")
+    for executable in manifest.executables:
+        path = root / TOOLS / executable.filename
+        if not path.is_file():
+            raise BundleError(f"Exécutable manquant: {executable.filename}")
+        if path.stat().st_size != executable.size or sha256_file(path) != executable.sha256:
+            raise BundleError(f"Exécutable altéré: {executable.filename}")
 
 
 def _offline_environment() -> dict[str, str]:

@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pydepot-portable"
-version = "0.1.0"
+version = "0.2.0"
 description = "Gestionnaire portable de bundles de dependances Python hors ligne"
 readme = "README.md"
 requires-python = ">=3.9"

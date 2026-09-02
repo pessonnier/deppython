@@ -9,6 +9,7 @@ from typing import Sequence
 from . import __version__
 from .bundle import (
     ExportOptions,
+    IncludedExecutable,
     ImportOptions,
     export_bundle,
     import_bundle,
@@ -54,6 +55,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--extra-index-url", action="append", default=[], help="Index additionnel, répétable"
     )
     export.add_argument("--pre", action="store_true", help="Autoriser les préversions")
+    export.add_argument(
+        "--include-executable",
+        action="append",
+        default=[],
+        metavar="SOURCE[=NOM]",
+        help=(
+            "Inclure un exécutable et l'installer dans bin/ du venv ; répétable. "
+            "NOM permet de renommer le fichier dans le bundle"
+        ),
+    )
+    export.add_argument(
+        "--allow-cross-platform",
+        action="store_true",
+        help=(
+            "Autoriser une cible d'une autre famille de système ; les marqueurs de "
+            "dépendances doivent être contrôlés séparément"
+        ),
+    )
     export.add_argument("--json", action="store_true", help="Afficher le manifeste en JSON")
 
     install = subparsers.add_parser(
@@ -73,6 +92,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--ignore-python-version", action="store_true", help="Ignorer le contrôle major.minor"
     )
     install.add_argument("--upgrade", action="store_true", help="Mettre à niveau les paquets présents")
+    install.add_argument(
+        "--tools-dir",
+        type=Path,
+        help="Dossier d'installation des exécutables inclus (par défaut: bin/ du venv)",
+    )
 
     inspect = subparsers.add_parser("inspect", help="Afficher le contenu d'un bundle")
     inspect.add_argument("bundle", type=Path)
@@ -112,13 +136,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     extra_index_urls=args.extra_index_url,
                     prerelease=args.pre,
                     python_executable=args.python,
+                    executables=[
+                        _parse_included_executable(value) for value in args.include_executable
+                    ],
+                    allow_cross_platform=args.allow_cross_platform,
                 ),
                 progress=_progress,
             )
             if args.json:
                 print(json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2))
             else:
-                print(f"✓ {len(manifest.artifacts)} artefact(s) exporté(s).")
+                print(
+                    f"✓ {len(manifest.artifacts)} wheel(s) et "
+                    f"{len(manifest.executables)} exécutable(s) exporté(s)."
+                )
             return 0
 
         if args.command in ("import", "install"):
@@ -131,6 +162,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     verify=not args.no_verify,
                     ignore_python_version=args.ignore_python_version,
                     upgrade=args.upgrade,
+                    tools_dir=args.tools_dir,
                 ),
                 progress=_progress,
             )
@@ -147,7 +179,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         if args.command == "verify":
             manifest = verify_bundle(args.bundle)
-            print(f"✓ Bundle intègre: {len(manifest.artifacts)} artefact(s) vérifié(s).")
+            print(
+                f"✓ Bundle intègre: {len(manifest.artifacts)} wheel(s) et "
+                f"{len(manifest.executables)} exécutable(s) vérifié(s)."
+            )
             return 0
 
         if args.command == "tui":
@@ -186,6 +221,7 @@ def _print_manifest(manifest, verified: bool) -> None:
     print(f"Plateforme(s) : {platforms}")
     print(f"Demandé       : {', '.join(manifest.requested)}")
     print(f"Contenu       : {len(manifest.artifacts)} artefact(s), {_human_size(size)}")
+    print(f"Exécutables   : {len(manifest.executables)}")
     print(f"Intégrité     : {'vérifiée' if verified else 'non vérifiée'}")
     print()
     width = max((len(item.name or item.filename) for item in manifest.artifacts), default=6)
@@ -193,6 +229,21 @@ def _print_manifest(manifest, verified: bool) -> None:
         label = item.name or item.filename
         version = item.version or "?"
         print(f"  {label:<{width}}  {version:>12}  {_human_size(item.size):>9}")
+    if manifest.executables:
+        print()
+        for item in manifest.executables:
+            print(f"  [outil] {item.filename}  {_human_size(item.size)}")
+
+
+def _parse_included_executable(value: str) -> IncludedExecutable:
+    source_text, separator, name = value.rpartition("=")
+    if not separator:
+        source_text, name = value, None
+    elif not source_text or not name:
+        raise PyDepotError(
+            f"Valeur --include-executable invalide: {value!r} (attendu: SOURCE[=NOM])"
+        )
+    return IncludedExecutable(source=Path(source_text), name=name)
 
 
 def _human_size(value: int) -> str:

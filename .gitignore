@@ -2,6 +2,6 @@ __pycache__/
 *.py[cod]
 .venv/
 *.pybundle
+!dist/opencode-speckit-linux-x64-py312.pybundle
 build/
 *.egg-info/
-

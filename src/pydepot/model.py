@@ -7,7 +7,8 @@ from typing import Any
 from . import __version__
 
 
-FORMAT_VERSION = 1
+FORMAT_VERSION = 2
+SUPPORTED_FORMAT_VERSIONS = {1, FORMAT_VERSION}
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,21 @@ class Artifact:
         )
 
 
+@dataclass(frozen=True)
+class BundledExecutable:
+    filename: str
+    sha256: str
+    size: int
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "BundledExecutable":
+        return cls(
+            filename=str(value["filename"]),
+            sha256=str(value["sha256"]),
+            size=int(value["size"]),
+        )
+
+
 @dataclass
 class Manifest:
     python_version: str
@@ -37,6 +53,7 @@ class Manifest:
     abis: list[str]
     requested: list[str]
     artifacts: list[Artifact] = field(default_factory=list)
+    executables: list[BundledExecutable] = field(default_factory=list)
     created_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
     )
@@ -49,12 +66,12 @@ class Manifest:
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "Manifest":
         version = int(value.get("format_version", 0))
-        if version != FORMAT_VERSION:
+        if version not in SUPPORTED_FORMAT_VERSIONS:
             from .errors import BundleError
 
             raise BundleError(
                 f"Version de bundle non prise en charge: {version} "
-                f"(attendue: {FORMAT_VERSION})."
+                f"(prises en charge: {min(SUPPORTED_FORMAT_VERSIONS)} à {FORMAT_VERSION})."
             )
         return cls(
             python_version=str(value["python_version"]),
@@ -63,8 +80,10 @@ class Manifest:
             abis=[str(item) for item in value.get("abis", [])],
             requested=[str(item) for item in value.get("requested", [])],
             artifacts=[Artifact.from_dict(item) for item in value.get("artifacts", [])],
+            executables=[
+                BundledExecutable.from_dict(item) for item in value.get("executables", [])
+            ],
             created_at=str(value["created_at"]),
             format_version=version,
             created_by=str(value.get("created_by", "unknown")),
         )
-

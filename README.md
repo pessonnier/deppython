@@ -1,7 +1,8 @@
 # PyDepot
 
-PyDepot crée un fichier portable contenant des dépendances Python et **tous leurs
-wheels transitifs**, puis les installe sur une machine hors ligne. Il propose la
+PyDepot crée un fichier portable contenant des dépendances Python, **tous leurs
+wheels transitifs** et, facultativement, des exécutables natifs, puis les installe
+sur une machine hors ligne. Il propose la
 même logique en ligne de commande et dans une TUI plein écran sans dépendance
 externe.
 
@@ -71,6 +72,35 @@ C'est ce qui rend l'import reproductible hors ligne sans compilateur ni
 téléchargement implicite de dépendances de build. Si un paquet ne publie pas de
 wheel compatible avec la cible, l'export échoue avec le diagnostic de pip.
 
+### Ajouter un exécutable natif
+
+Un ou plusieurs outils déjà téléchargés peuvent être ajoutés au bundle. Le nom
+après `=` est celui qui sera installé dans le dossier `bin/` du venv cible :
+
+```console
+pydepot export specify-cli==1.0.3 -o outils.pybundle \
+  --include-executable ./opencode-linux=opencode
+```
+
+L'exécutable est décrit dans le manifeste et contrôlé par SHA-256. À l'import,
+il est copié dans `bin/` (`Scripts/` sous Windows) et reçoit le droit
+d'exécution. Sans `--venv`, préciser `--tools-dir`; avec `--target`, la
+destination par défaut est `<target>/bin`. Un fichier existant différent n'est
+remplacé que si `--upgrade` est fourni.
+
+### Exporter vers une autre famille de système
+
+Par défaut, PyDepot refuse toujours une résolution Windows→Linux, car `pip`
+évalue certains marqueurs de dépendances avec le système qui exécute l'export.
+L'option explicite `--allow-cross-platform` l'autorise lorsque les dépendances
+ont été contrôlées et que `--platform` et `--abi` décrivent complètement la
+cible. Pour un ensemble de dépendances inconnu, une construction dans Docker ou
+WSL reste la méthode recommandée.
+
+L'exemple [`examples/opencode-speckit/`](examples/opencode-speckit/README.md)
+illustre le cas vérifié Spec Kit + exécutable OpenCode, construit sous Windows
+pour Linux x86-64 et Python 3.12.
+
 ## Importer hors ligne
 
 Copier le seul fichier `.pybundle` sur la machine isolée, puis :
@@ -123,11 +153,14 @@ Un bundle est un ZIP lisible contenant :
 - `manifest.json` : cible, demande initiale, tailles et empreintes ;
 - `requirements.lock` : toutes les distributions résolues, versions exactes ;
 - `packages/` : wheelhouse complet utilisé par l'import hors ligne.
+- `tools/` : exécutables natifs facultatifs, installés avec leur empreinte.
 
 ## Limites connues
 
 - Un bundle cible une version Python majeure/mineure et une famille de
   plateforme données. Pour plusieurs cibles, créer un bundle par cible.
+- Les exécutables inclus doivent eux aussi correspondre au système, à
+  l'architecture et, sous Linux, à la libc de la cible.
 - L'interpréteur et la famille de système servant à l'export doivent
   correspondre à la cible afin que les marqueurs de dépendances soient résolus
   dans le bon environnement.

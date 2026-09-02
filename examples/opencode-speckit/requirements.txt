@@ -1,0 +1,2 @@
+# Version principale épinglée; le bundle verrouille ensuite toutes les transitives.
+specify-cli==1.0.3
