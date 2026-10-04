@@ -120,6 +120,7 @@ def export_bundle(options: ExportOptions, progress: Progress | None = None) -> M
         if (options.packages or options.requirements) and not files:
             raise BundleError("pip n'a téléchargé aucun artefact.")
         artifacts = [_artifact_from_file(path) for path in files]
+        requested = _canonicalize_local_wheel_requests(requested, artifacts)
         lock_lines = _lock_lines(artifacts)
         if files and not lock_lines:
             raise BundleError("Aucun wheel exploitable n'a été trouvé dans le téléchargement.")
@@ -428,6 +429,26 @@ def _read_top_level_requirements(path: Path) -> list[str]:
         line = raw.strip()
         if line and not line.startswith(("#", "-")):
             result.append(line.split(" #", 1)[0].strip())
+    return result
+
+
+def _canonicalize_local_wheel_requests(
+    requested: Iterable[str], artifacts: Iterable[Artifact]
+) -> list[str]:
+    """Replace local wheel paths with stable distribution pins in the manifest."""
+    by_filename = {
+        artifact.filename.casefold(): artifact
+        for artifact in artifacts
+        if artifact.name and artifact.version
+    }
+    result: list[str] = []
+    for value in requested:
+        filename = Path(value).name
+        artifact = by_filename.get(filename.casefold()) if filename.endswith(".whl") else None
+        if artifact:
+            result.append(f"{artifact.name}=={artifact.version}")
+        else:
+            result.append(value)
     return result
 
 

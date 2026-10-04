@@ -1,0 +1,4 @@
+# Graphify est publié sous le nom de paquet graphifyy et expose la commande graphify.
+# Spec Kit 1.1.0 est construit depuis son tag GitHub par build-windows.ps1, car
+# cette version n'est pas encore publiée sur PyPI au 4 octobre 2026.
+graphifyy==0.9.76

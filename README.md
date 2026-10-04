@@ -78,7 +78,7 @@ Un ou plusieurs outils déjà téléchargés peuvent être ajoutés au bundle. L
 après `=` est celui qui sera installé dans le dossier `bin/` du venv cible :
 
 ```console
-pydepot export specify-cli==1.0.3 -o outils.pybundle \
+pydepot export graphifyy==0.9.76 -o outils.pybundle \
   --include-executable ./opencode-linux=opencode
 ```
 
@@ -97,9 +97,10 @@ ont été contrôlées et que `--platform` et `--abi` décrivent complètement l
 cible. Pour un ensemble de dépendances inconnu, une construction dans Docker ou
 WSL reste la méthode recommandée.
 
-L'exemple [`examples/opencode-speckit/`](examples/opencode-speckit/README.md)
-illustre le cas vérifié Spec Kit + exécutable OpenCode, construit sous Windows
-pour Linux x86-64 et Python 3.12.
+L'exemple
+[`examples/opencode-speckit-graphify/`](examples/opencode-speckit-graphify/README.md)
+illustre un déploiement hors ligne vérifié d'OpenCode, Spec Kit et Graphify,
+construit sous Windows pour Linux x86-64, glibc 2.28+ et Python 3.14.
 
 ## Importer hors ligne
 

@@ -82,6 +82,25 @@ class BundleTests(unittest.TestCase):
         with zipfile.ZipFile(output) as archive:
             self.assertEqual(archive.read("tools/opencode"), b"linux executable")
 
+    def test_export_canonicalizes_local_wheel_path_in_manifest(self) -> None:
+        local_wheel = self.root / "private" / "demo_lib-1.2.3-py3-none-any.whl"
+        local_wheel.parent.mkdir()
+        local_wheel.touch()
+        output = self.root / "local-wheel.pybundle"
+
+        with mock.patch(
+            "pydepot.bundle.run_streaming", side_effect=_fake_download
+        ), mock.patch("pydepot.bundle.python_version", return_value="3.11"):
+            manifest = export_bundle(
+                ExportOptions(
+                    output=output,
+                    packages=[str(local_wheel)],
+                    python_version="3.11",
+                )
+            )
+
+        self.assertEqual(manifest.requested, ["demo-lib==1.2.3"])
+
     def test_modified_executable_is_rejected(self) -> None:
         output = self.make_bundle(include_tool=True)
         altered = self.root / "altered-tool.pybundle"
